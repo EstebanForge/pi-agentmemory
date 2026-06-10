@@ -1,6 +1,6 @@
 # @estebanforge/pi-agentmemory
 
-Pi-native agentmemory tools. Bypasses MCP entirely — direct REST to the agentmemory server with automatic recall injection.
+Pi-native [agent-memory.dev](https://agent-memory.dev) tools. Bypasses MCP entirely — direct REST to the agentmemory server with automatic recall injection.
 
 ## Install
 
@@ -8,13 +8,7 @@ Pi-native agentmemory tools. Bypasses MCP entirely — direct REST to the agentm
 pi install npm:@estebanforge/pi-agentmemory
 ```
 
-Or install directly from git:
-
-```
-pi install git:https://github.com/EstebanForge/pi-agentmemory
-```
-
-Requires the agentmemory server running locally. See [agentmemory](https://github.com/EstebanForge/pi-agentmemory) for setup.
+Requires the agentmemory server running locally. See [agent-memory.dev](https://agent-memory.dev) for docs or [github.com/rohitg00/agentmemory](https://github.com/rohitg00/agentmemory) for the source.
 
 ## Tools
 

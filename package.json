@@ -1,14 +1,14 @@
 {
   "name": "@estebanforge/pi-agentmemory",
   "version": "1.0.0",
-  "description": "Pi-native agentmemory tools — cross-session memory via REST, no MCP dependency",
+  "description": "Pi-native agent-memory.dev tools — cross-session memory via REST, no MCP dependency",
   "keywords": [
     "pi-package"
   ],
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/EstebanForge/pi-agentmemory"
+    "url": "git+https://github.com/EstebanForge/pi-agentmemory.git"
   },
   "type": "module",
   "files": [

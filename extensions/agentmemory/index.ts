@@ -132,6 +132,7 @@ export default function agentmemoryExtension(pi: ExtensionAPI) {
   let currentProject = process.cwd();
   let lastPrompt = "";
   let lastHealthOk = false;
+  let pendingSearch: Promise<string> | null = null;
 
   async function getHealth() {
     return await callAgentMemory<HealthResponse>("health", {
@@ -280,26 +281,49 @@ export default function agentmemoryExtension(pi: ExtensionAPI) {
     await refreshStatus(ctx);
   });
 
-  // Hook: before_agent_start (auto-recall)
+  // Hook: before_agent_start (start search, return immediately)
   pi.on("before_agent_start", async (event, ctx) => {
     currentProject = event.systemPromptOptions.cwd || process.cwd();
     lastPrompt = event.prompt?.trim() || "";
-    if (!lastPrompt) return;
+    pendingSearch = null;
 
-    const result = await callAgentMemory<{ results?: SmartSearchResult[] }>(
-      "smart-search",
-      { body: { query: lastPrompt, limit: 5 } },
-    );
-    const results = result?.results || [];
-    const recallBlock = results.length
-      ? ["Relevant long-term memory from agentmemory:", formatSearchResults(results)].join("\n")
-      : "";
+    if (lastPrompt) {
+      pendingSearch = (async () => {
+        const result = await callAgentMemory<{ results?: SmartSearchResult[] }>(
+          "smart-search",
+          { body: { query: lastPrompt, limit: 5 } },
+        );
+        const results = result?.results || [];
+        return results.length
+          ? ["Relevant long-term memory from agentmemory:", formatSearchResults(results)].join("\n")
+          : "";
+      })();
+    }
 
-    await refreshStatus(ctx);
+    // Snapshot ui to avoid ctx lifetime issues during fire-and-forget
+    const { ui } = ctx;
+    void refreshStatus({ ui });
     return {
-      systemPrompt: [event.systemPrompt, TOOL_GUIDANCE, recallBlock]
+      systemPrompt: [event.systemPrompt, TOOL_GUIDANCE]
         .filter(Boolean)
         .join("\n\n"),
+    };
+  });
+
+  // Hook: context (inject search results before first LLM call)
+  pi.on("context", async (event) => {
+    if (!pendingSearch) return;
+    const search = pendingSearch;
+    pendingSearch = null;
+
+    const recallBlock = await search;
+    if (!recallBlock) return;
+
+    return {
+      messages: [
+        { role: "user", content: [{ type: "text", text: recallBlock }] },
+        ...event.messages,
+      ],
     };
   });
 
