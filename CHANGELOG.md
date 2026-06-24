@@ -1,5 +1,30 @@
 # Changelog
 
+## 1.0.2 (2026-06-24)
+
+### Changed
+- **Auto-start is now opt-in (default off).** `agentmemory-autostart` now
+  defaults to `false`. Spawning a detached server (and a possible `npx`
+  engine download) on every session hung agent startup on slower machines.
+  Existing users who relied on the auto-start must enable it once via
+  `/agentmemory`, `pi config set agentmemory-autostart true`, or the flag
+  editor. The server is still reused if already running (health-check
+  detection is unchanged). `agentmemory-npx-fallback` keeps its `true`
+  default — it only matters once auto-start is on.
+
+### Added
+- **`/agentmemory` slash command.** Modeled on pi-glm-tweaks' `/glm-tweaks`:
+  shows server health plus the on/off state of every flag, and flips flags
+  via `pi config set` + session reload. Supports `/agentmemory` (interactive
+  `SettingsList` menu in the TUI; read-only status panel headless),
+  `/agentmemory status`, `/agentmemory toggle <flag>`, and the shorthand
+  `/agentmemory <flag>`. Tab-completion covers `toggle`, `status`, and flag
+  names.
+
+### Removed
+- **`/agentmemory-status` slash command.** Superseded by `/agentmemory`,
+  which shows the same server health alongside the flag menu.
+
 ## 1.0.1 (2026-06-24)
 
 ### Added

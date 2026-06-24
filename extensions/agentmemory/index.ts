@@ -1,6 +1,6 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { getSettingsListTheme, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { Text } from "@earendil-works/pi-tui";
+import { Container, SettingsList, Text, type SettingItem } from "@earendil-works/pi-tui";
 import path from "node:path";
 import crypto from "node:crypto";
 import { createPlaintextBearerAuthGuard } from "./security.js";
@@ -34,6 +34,26 @@ type HealthResponse = {
 
 const DEFAULT_URL = process.env.AGENTMEMORY_URL || "http://localhost:3111";
 const guardPlaintextBearerAuth = createPlaintextBearerAuthGuard();
+
+// User-facing flags. Single source of truth — drives registerFlag, the
+// /agentmemory status display, autocomplete, and the toggle subcommand.
+// Auto-start is OPT-IN (default false): spawning a detached server (and
+// possibly an `npx` download) on every session hangs agent startup on
+// slower machines. Users enable it via `/agentmemory` or `pi config`.
+const FLAGS = [
+  {
+    name: "agentmemory-autostart",
+    label: "Auto-start server",
+    description:
+      "Start the local agentmemory server automatically when a session starts or a memory tool runs, if it is installed (or via npx when agentmemory-npx-fallback is on). Off by default — enable if your machine starts the server quickly.",
+  },
+  {
+    name: "agentmemory-npx-fallback",
+    label: "npx fallback",
+    description:
+      "If the agentmemory CLI is not on PATH, start it via `npx -y @agentmemory/agentmemory@latest`. Disable to only start a globally-installed server (and otherwise report that it is not installed).",
+  },
+] as const;
 
 const TOOL_GUIDANCE = [
   "agentmemory is available for cross-session memory.",
@@ -130,20 +150,18 @@ export default function agentmemoryExtension(pi: ExtensionAPI) {
     );
   }
 
-  // Flags surface in `pi config` / the flag editor. registerFlag is static
-  // setup at factory top-level (not per session), so user choices persist.
-  pi.registerFlag("agentmemory-autostart", {
-    description:
-      "Start the local agentmemory server automatically when a session starts or a memory tool runs, if it is installed (or via npx when agentmemory-npx-fallback is on). The server is only started when the health check finds it down.",
-    type: "boolean",
-    default: true,
-  });
-  pi.registerFlag("agentmemory-npx-fallback", {
-    description:
-      "If the agentmemory CLI is not on PATH, start it via `npx -y @agentmemory/agentmemory@latest`. Disable to only start a globally-installed server (and otherwise report that it is not installed).",
-    type: "boolean",
-    default: true,
-  });
+  // Register Pi-idiomatic flags at factory load time, NOT inside
+  // session_start. registerFlag is static setup; calling it per session
+  // would clobber user preferences on every /new or /reload. Both flags
+  // default off/false as written here; agentmemory-npx-fallback is
+  // overridden to default true below (it only matters once auto-start is on).
+  for (const f of FLAGS) {
+    pi.registerFlag(f.name, {
+      description: f.description,
+      type: "boolean",
+      default: f.name === "agentmemory-npx-fallback",
+    });
+  }
 
   let autoStartedNotified = false;
   function ensureOpts() {
@@ -180,22 +198,185 @@ export default function agentmemoryExtension(pi: ExtensionAPI) {
     );
   }
 
-  // Slash command: /agentmemory-status
-  pi.registerCommand("agentmemory-status", {
-    description: "Check local agentmemory server health",
-    handler: async (_args, ctx) => {
-      const health = await getHealth();
-      if (!health) {
-        ctx.ui.notify(
-          "agentmemory is unreachable at http://localhost:3111",
-          "warning",
-        );
+  // Build the /agentmemory status panel. Read-only snapshot of server
+  // health and the on/off state of every flag. `health` is fetched by the
+  // caller (async) and threaded in so this stays sync like the glm-tweaks
+  // reference.
+  function renderStatus(health: HealthResponse | null): string {
+    const healthy =
+      !!health &&
+      (health.status === "healthy" || health.health?.status === "healthy");
+    const healthLine = health
+      ? `${healthy ? "healthy" : health.status || health.health?.status || "unknown"}${health.version ? ` v${health.version}` : ""}`
+      : "unreachable at http://localhost:3111";
+    const flagLines = FLAGS.map(
+      (f) => `  ${pi.getFlag(f.name) === true ? "[x]" : "[ ]"} ${f.name}`,
+    );
+    return [
+      `agentmemory — server: ${healthLine}`,
+      "",
+      "flags:",
+      ...flagLines,
+      "",
+      "toggle: /agentmemory toggle <flag>   (shorthand: /agentmemory <flag>)",
+      "also:   pi config set <flag> true",
+    ].join("\n");
+  }
+
+  // /agentmemory — status display by default; `toggle <flag>` (or bare
+  // `<flag>`) flips a boolean. ExtensionAPI exposes no live setFlag, so a
+  // toggle persists via `pi config set` and then reloads the session so
+  // the in-memory flag value picks up the change. ctx is stale after
+  // reload() — we notify first, reload last, and return immediately.
+  pi.registerCommand("agentmemory", {
+    description:
+      "agentmemory: show server health + flags, or toggle a flag. Usage: /agentmemory [toggle <flag>]",
+    getArgumentCompletions: (prefix: string) => {
+      // Preserve trailing space: `/agentmemory toggle ` (with space) means
+      // the `toggle` token is complete and we should now suggest flags.
+      // Trimming would collapse it to "toggle" and re-suggest the word.
+      const trailingSpace = /\s$/.test(prefix);
+      const tokens = prefix.trim().split(/\s+/).filter(Boolean);
+      const flagNames = FLAGS.map((f) => f.name);
+      const root = ["toggle", "status", ...flagNames];
+      // Suggest flag names once `toggle` is complete (either as the only
+      // token with a trailing space, or with a partial flag typed).
+      const toggleComplete =
+        (tokens.length === 1 && tokens[0] === "toggle") ||
+        (tokens.length >= 2 && tokens[0] === "toggle");
+      if (toggleComplete) {
+        const partial = tokens.length >= 2 ? tokens[tokens.length - 1] : "";
+        const hits = flagNames.filter((n) => n.startsWith(partial));
+        return hits.length ? hits.map((v) => ({ value: v, label: v })) : null;
+      }
+      if (tokens.length <= 1 && !trailingSpace) {
+        const hits = root.filter((o) => o.startsWith(tokens[0] ?? ""));
+        return hits.length ? hits.map((v) => ({ value: v, label: v })) : null;
+      }
+      return null;
+    },
+    handler: async (args, ctx) => {
+      const trimmed = args.trim();
+
+      // Toggle mode: `/agentmemory toggle <flag>` or `/agentmemory <flag>`.
+      // Direct one-shot flip — persists via `pi config set` then reloads.
+      // Bare `/agentmemory toggle` (no flag) and `/agentmemory status`
+      // fall through to the menu.
+      if (
+        trimmed !== "" &&
+        trimmed !== "status" &&
+        trimmed !== "toggle"
+      ) {
+        const tokens = trimmed.split(/\s+/).filter(Boolean);
+        const flagName = tokens[0] === "toggle" ? tokens[1] : tokens[0];
+        const meta = FLAGS.find((f) => f.name === flagName);
+        if (!meta) {
+          ctx.ui.notify(
+            `Unknown flag "${flagName}". Valid: ${FLAGS.map((f) => f.name).join(", ")}`,
+            "warning",
+          );
+          return;
+        }
+        const current = pi.getFlag(meta.name) === true;
+        const next = !current;
+        const result = await pi.exec("pi", [
+          "config",
+          "set",
+          meta.name,
+          String(next),
+        ]);
+        if (result.code !== 0) {
+          ctx.ui.notify(
+            `Failed to set ${meta.name}: ${result.stderr.trim() || `exit ${result.code}`}`,
+            "error",
+          );
+          return;
+        }
+        ctx.ui.notify(`${meta.name}: ${current} → ${next}. Reloading...`, "info");
+        await ctx.reload();
         return;
       }
-      ctx.ui.notify(
-        `agentmemory ${health.status || health.health?.status || "unknown"}${health.version ? ` v${health.version}` : ""}`,
-        "info",
-      );
+
+      // Status/menu mode. Fetch health once up front (both the non-TUI
+      // panel and the TUI header reuse it).
+      const health = await getHealth();
+
+      // Outside TUI (RPC/headless), fall back to the read-only status
+      // panel — custom components are terminal-only.
+      if (ctx.mode !== "tui") {
+        ctx.ui.notify(renderStatus(health), "info");
+        return;
+      }
+
+      const pending = new Map<string, boolean>();
+      const items: SettingItem[] = FLAGS.map((f) => ({
+        id: f.name,
+        label: f.label,
+        description: f.description,
+        currentValue: pi.getFlag(f.name) === true ? "on" : "off",
+        values: ["on", "off"],
+      }));
+
+      const healthy =
+        !!health &&
+        (health.status === "healthy" || health.health?.status === "healthy");
+      const healthText = health
+        ? `${healthy ? "healthy" : health.status || health.health?.status || "unknown"}${health.version ? ` v${health.version}` : ""}`
+        : "unreachable";
+
+      await ctx.ui.custom((tui, theme, _kb, done) => {
+        const container = new Container();
+        container.addChild(
+          new Text(theme.fg("accent", `agentmemory — server: ${healthText}`), 1, 1),
+        );
+
+        const settingsList = new SettingsList(
+          items,
+          Math.min(items.length + 2, 15),
+          getSettingsListTheme(),
+          (id, newValue) => {
+            // Stage the change; persist + reload on close, not here,
+            // so the user can flip several flags per visit.
+            pending.set(id, newValue === "on");
+          },
+          () => done(undefined),
+        );
+        container.addChild(settingsList);
+
+        return {
+          render: (w: number) => container.render(w),
+          invalidate: () => container.invalidate(),
+          handleInput: (data: string) => {
+            settingsList.handleInput?.(data);
+            tui.requestRender();
+          },
+        };
+      });
+
+      // Dialog closed. ctx is still valid here (reload is the only
+      // staleness trigger, and we haven't called it yet). Drop net-zero
+      // flips (a flag toggled on then off stages but changes nothing),
+      // then persist genuine deltas and reload once if any moved.
+      const deltas: Array<[string, boolean]> = [];
+      for (const [name, val] of pending) {
+        const currentlyOn = pi.getFlag(name) === true;
+        if (currentlyOn === val) continue; // net-zero: toggled back to current
+        deltas.push([name, val]);
+      }
+      if (deltas.length === 0) return;
+
+      const failures: string[] = [];
+      for (const [name, val] of deltas) {
+        const r = await pi.exec("pi", ["config", "set", name, String(val)]);
+        if (r.code !== 0)
+          failures.push(`${name} (${r.stderr.trim() || `exit ${r.code}`})`);
+      }
+      if (failures.length > 0) {
+        ctx.ui.notify(`Failed to apply: ${failures.join("; ")}`, "error");
+        return;
+      }
+      ctx.ui.notify(`Applied ${deltas.length} change(s). Reloading...`, "info");
+      await ctx.reload();
     },
   });
 

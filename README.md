@@ -41,7 +41,7 @@ Three tools, one command, and a recall/observe lifecycle wired into Pi hooks.
 
 | Command | Description |
 | --- | --- |
-| `/agentmemory-status` | Check server health from the command palette |
+| `/agentmemory` | Show server health + flags, or toggle a flag (`/agentmemory [toggle <flag>]`) |
 
 ### Hooks
 
