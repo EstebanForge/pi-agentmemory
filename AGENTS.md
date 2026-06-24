@@ -12,6 +12,7 @@ Pi-native extension providing cross-session memory via the agentmemory REST API.
 ```
 extensions/agentmemory/
   index.ts        # Extension entrypoint — tools, hooks, command registration
+  server.ts       # Auto-start: health-check, detect CLI, detached spawn, poll
   security.ts     # Plaintext bearer auth guard (warns/errors on HTTP + secret)
 ```
 - `extensions/`: All Pi extension source code (the `"files"` whitelist in package.json)
@@ -36,10 +37,12 @@ extensions/agentmemory/
 - **Extension pattern**: Single default export function receiving `ExtensionAPI`. Registers tools, hooks, and commands declaratively
 - **Hooks lifecycle**: `session_start` (derive session ID, health check) → `before_agent_start` (fire-and-forget smart-search, append guidance to system prompt) → `context` (inject awaited search results as user message before LLM call) → `agent_end` (observe conversation turn back to agentmemory)
 - **REST client**: `callAgentMemory<T>()` generic helper — single function for all API calls, handles URL normalization, auth headers, error suppression
+- **Auto-start**: `server.ts` `ensureServer()` health-checks first (so a server left running by a previous Pi, or started by another instance, is never restarted), then spawns `agentmemory` detached (or `npx` fallback) and polls. An in-flight dedup promise keeps one Pi from spawning repeatedly. Gated by flags `agentmemory-autostart` and `agentmemory-npx-fallback`
 - **Security**: Plaintext bearer auth guard in `security.ts`. Warns once on HTTP+secret; throws if `AGENTMEMORY_REQUIRE_HTTPS=1`
 
 ## WHERE TO LOOK
-- **Source**: `extensions/agentmemory/index.ts` (everything in one file)
+- **Source**: `extensions/agentmemory/index.ts` (tools, hooks, command, flags)
+- **Auto-start**: `extensions/agentmemory/server.ts`
 - **Security**: `extensions/agentmemory/security.ts`
 - **Config**: `package.json` (pi.extensions array, peerDependencies), `tsconfig.json`
 

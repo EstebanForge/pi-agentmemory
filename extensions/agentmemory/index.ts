@@ -1,8 +1,10 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { Text } from "@earendil-works/pi-tui";
 import path from "node:path";
 import crypto from "node:crypto";
 import { createPlaintextBearerAuthGuard } from "./security.js";
+import { ensureServer } from "./server.js";
 
 type TextBlock = { type?: string; text?: string };
 type AssistantMessage = { role?: string; content?: unknown };
@@ -128,6 +130,31 @@ export default function agentmemoryExtension(pi: ExtensionAPI) {
     );
   }
 
+  // Flags surface in `pi config` / the flag editor. registerFlag is static
+  // setup at factory top-level (not per session), so user choices persist.
+  pi.registerFlag("agentmemory-autostart", {
+    description:
+      "Start the local agentmemory server automatically when a session starts or a memory tool runs, if it is installed (or via npx when agentmemory-npx-fallback is on). The server is only started when the health check finds it down.",
+    type: "boolean",
+    default: true,
+  });
+  pi.registerFlag("agentmemory-npx-fallback", {
+    description:
+      "If the agentmemory CLI is not on PATH, start it via `npx -y @agentmemory/agentmemory@latest`. Disable to only start a globally-installed server (and otherwise report that it is not installed).",
+    type: "boolean",
+    default: true,
+  });
+
+  let autoStartedNotified = false;
+  function ensureOpts() {
+    return {
+      baseUrl: normalizeBaseUrl(process.env.AGENTMEMORY_URL || DEFAULT_URL),
+      secret: process.env.AGENTMEMORY_SECRET,
+      autostart: pi.getFlag("agentmemory-autostart") !== false,
+      npxFallback: pi.getFlag("agentmemory-npx-fallback") !== false,
+    };
+  }
+
   let sessionId = `ephemeral-${crypto.randomUUID().slice(0, 8)}`;
   let currentProject = process.cwd();
   let lastPrompt = "";
@@ -199,8 +226,28 @@ export default function agentmemoryExtension(pi: ExtensionAPI) {
             text: `agentmemory status: ${health.status || health.health?.status || "unknown"}${health.version ? ` (v${health.version})` : ""}`,
           },
         ],
-        details: health,
+        details: { ...health, ok: true },
       };
+    },
+    renderResult(result, _renderState, theme) {
+      const details = result.details as
+        | (HealthResponse & { ok?: boolean })
+        | undefined;
+      if (!details || details.ok === false)
+        return new Text(theme.fg("error", "● agentmemory unreachable"), 0, 0);
+      const status = details.status || details.health?.status || "unknown";
+      const version = details.version ? ` v${details.version}` : "";
+      if (status === "healthy")
+        return new Text(
+          theme.fg("success", `● agentmemory healthy${version}`),
+          0,
+          0,
+        );
+      return new Text(
+        theme.fg("warning", `● agentmemory ${status}${version}`),
+        0,
+        0,
+      );
     },
   });
 
@@ -222,6 +269,13 @@ export default function agentmemoryExtension(pi: ExtensionAPI) {
       ),
     }),
     async execute(_toolCallId, params) {
+      const ensured = await ensureServer(ensureOpts());
+      if (!ensured.ok) {
+        return {
+          content: [{ type: "text", text: ensured.reason }],
+          details: { ok: false, query: params.query, results: [] },
+        };
+      }
       const result = await callAgentMemory<{ results?: SmartSearchResult[] }>(
         "smart-search",
         { body: { query: params.query, limit: params.limit ?? 5 } },
@@ -229,7 +283,7 @@ export default function agentmemoryExtension(pi: ExtensionAPI) {
       const results = result?.results || [];
       return {
         content: [{ type: "text", text: formatSearchResults(results) }],
-        details: { query: params.query, results },
+        details: { ok: true, query: params.query, results },
       };
     },
   });
@@ -247,6 +301,13 @@ export default function agentmemoryExtension(pi: ExtensionAPI) {
       ),
     }),
     async execute(_toolCallId, params) {
+      const ensured = await ensureServer(ensureOpts());
+      if (!ensured.ok) {
+        return {
+          content: [{ type: "text", text: ensured.reason }],
+          details: { ok: false },
+        };
+      }
       const result = await callAgentMemory<Record<string, unknown>>(
         "remember",
         { body: { content: params.content, type: params.type || "fact" } },
@@ -278,6 +339,21 @@ export default function agentmemoryExtension(pi: ExtensionAPI) {
       ? path.basename(sessionFile).replace(/\.[^.]+$/, "")
       : `ephemeral-${crypto.randomUUID().slice(0, 8)}`;
     currentProject = process.cwd();
+    // Kick the server start off in the background so a cold start (engine
+    // download, ~15s) never stalls the session. refreshStatus below does a quick
+    // health check; tools and before_agent_start await the shared attempt if
+    // they need the server. Snapshot ui for the fire-and-forget callback.
+    const { ui } = ctx;
+    void ensureServer(ensureOpts())
+      .then((ensured) => {
+        if (ensured.ok && ensured.started && !autoStartedNotified) {
+          autoStartedNotified = true;
+          ui.notify("agentmemory server started automatically.", "info");
+        }
+      })
+      .catch(() => {
+        /* best-effort; tools retry on demand */
+      });
     await refreshStatus(ctx);
   });
 
@@ -321,7 +397,7 @@ export default function agentmemoryExtension(pi: ExtensionAPI) {
 
     return {
       messages: [
-        { role: "user", content: [{ type: "text", text: recallBlock }] },
+        { role: "user", content: [{ type: "text", text: recallBlock }] } as never,
         ...event.messages,
       ],
     };
