@@ -59,8 +59,13 @@ export async function isServerHealthy(
       status?: string;
       health?: { status?: string };
     };
+    // The engine self-reports `degraded` under memory pressure (RSS watermark,
+    // KV lag) while still serving reads/writes. Treat anything except an
+    // explicit down/unhealthy as reachable so a pressured-but-working server
+    // shared across Pi instances (host + construct sandbox) isn't misread as
+    // down, which would trip the autostart-disabled bail path.
     const status = body.status ?? body.health?.status;
-    return status === "healthy" || status === "ok";
+    return status !== "unhealthy" && status !== "down" && status !== undefined;
   } catch {
     return false;
   }

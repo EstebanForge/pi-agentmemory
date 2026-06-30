@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.3 (2026-06-30)
+
+### Fixed
+- `isServerHealthy` misread a pressured-but-working server as down. The
+  engine self-reports `degraded` under memory pressure (RSS watermark, KV
+  lag) while still serving reads/writes, but the health check only accepted
+  `healthy`/`ok`. Now anything except an explicit `unhealthy`/`down` (or
+  missing status) counts as reachable, so a shared pressured server (host +
+  construct sandbox) no longer trips the autostart-disabled bail path.
+
 ## 1.0.2 (2026-06-24)
 
 ### Changed
