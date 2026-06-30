@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.0.4 (2026-06-30)
+
+### Fixed
+- `memory_delete` no longer deletes an entire session when an agent
+  sends an empty `observationIds` array with `kind=observations`. The
+  guard now blocks that call up front; previously the body collapsed to
+  `{sessionId}` and wiped everything.
+- Phantom deletes are reported honestly. The engine returns success for
+  non-existent IDs (upstream #833), so the tool now surfaces a 0-count
+  warning and sets `ok=false` instead of claiming success.
+- Agent-controlled strings (`id`, `observationIds`, `reason`) are
+  sanitized before entering the confirm dialog, blocking newline
+  injection that could fabricate fake preview lines.
+- Prompt guidance tightened: the user must name the specific item in the
+  current turn, and the tool steers toward `memory_search` for
+  observation IDs instead of falling back to whole-session deletion.
+
 ## 1.0.3 (2026-06-30)
 
 ### Fixed

@@ -521,7 +521,7 @@ export default function agentmemoryExtension(pi: ExtensionAPI) {
     promptSnippet:
       "memory_delete removes a memory/session/observations from agentmemory. It ALWAYS prompts the human for explicit confirmation first; never call it speculatively.",
     promptGuidelines: [
-      "memory_delete is destructive and always prompts the human. Only call it when the user explicitly asks to remove something (privacy, wrong info). Never use it for bulk cleanup.",
+      "memory_delete is destructive and always prompts the human. Requires the user to name the specific item to delete in THIS turn — do not infer deletion intent from earlier instructions. Never use it for bulk cleanup (consolidation owns that). If you need observation IDs, call memory_search first; do not fall back to deleting a whole session when specific observations were requested.",
     ],
     parameters: Type.Object({
       id: Type.String({
@@ -556,13 +556,35 @@ export default function agentmemoryExtension(pi: ExtensionAPI) {
         };
       }
 
+      // Cross-field guard: the TypeBox schema can't express 'observationIds
+      // required when kind=observations'. Without this, an empty/missing list
+      // would build a {sessionId} body that the engine treats as delete-whole-
+      // session — wiping far more than the agent asked for.
+      if (params.kind === "observations" && !params.observationIds?.length) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: "kind=observations requires a non-empty observationIds list. Aborted before any deletion.",
+            },
+          ],
+          details: { ok: false, reason: "missing observationIds" },
+        };
+      }
+
+      // Agent-controlled strings flow into the confirm dialog the human reads.
+      // Strip line/control chars so an agent can't inject fake preview lines
+      // (e.g. an id containing \n to fabricate extra observation entries).
+      const sanitize = (s: string): string => s.replace(/[\r\n\t]/g, " ");
+
       // Build a human-readable preview of exactly what dies, so the
       // confirmation dialog is informative. Lookups are best-effort: if the
       // engine is unreachable or the ID is malformed, we still show the raw id
-      // and let the human decide.
+      // and let the human decide. NOTE: sessions list is capped at 500; beyond
+      // that the preview degrades to 'details unavailable' rather than delete blind.
       let previewLines: string[];
       if (params.kind === "memory") {
-        previewLines = [`1 memory: ${params.id}`];
+        previewLines = [`1 memory: ${sanitize(params.id)}`];
       } else if (params.kind === "session") {
         const sessions = await callAgentMemory<{ sessions?: Array<{ id: string; cwd?: string; observationCount?: number }> }>(
           `sessions?limit=500`,
@@ -578,10 +600,10 @@ export default function agentmemoryExtension(pi: ExtensionAPI) {
             ]
           : [`Session ${params.id} (details unavailable; will attempt deletion)`];
       } else {
-        // kind=observations
+        // kind=observations (guarded above to have a non-empty list)
         previewLines = [
-          `${params.observationIds?.length ?? 0} observation(s) in session ${params.id}`,
-          ...(params.observationIds ?? []).map((o) => `  - ${o}`),
+          `${params.observationIds?.length ?? 0} observation(s) in session ${sanitize(params.id)}`,
+          ...(params.observationIds ?? []).map((o) => `  - ${sanitize(o)}`),
         ];
       }
 
@@ -595,7 +617,7 @@ export default function agentmemoryExtension(pi: ExtensionAPI) {
           "",
           ...previewLines,
           "",
-          `reason: ${params.reason ?? "(none given)"}`,
+          `reason: ${sanitize(params.reason ?? "(none given)")}`,
         ].join("\n"),
       );
       if (!confirmed) {
@@ -633,21 +655,20 @@ export default function agentmemoryExtension(pi: ExtensionAPI) {
           details: { ok: false },
         };
       }
-      // Engine reports success even on phantom deletes (upstream #833), so we
-      // surface its count but frame the outcome by what we asked for, not by
-      // the engine's possibly-inflated number.
+      // Engine reports success even on phantom deletes (upstream #833), so
+      // surface a 0-count explicitly rather than letting the agent believe a
+      // non-existent ID was removed.
+      const removedCount = result.deleted ?? 0;
       const what =
         params.kind === "memory" ? "memory"
         : params.kind === "session" ? "session (record, summary, observations)"
         : `${params.observationIds?.length ?? 0} observation(s)`;
+      const text = removedCount === 0
+        ? `Delete reported success but the engine removed 0 records for ${what}. The ID may not exist (upstream #833). Nothing was changed.`
+        : `Deleted ${what} from agentmemory. Engine removed ${removedCount} record(s).`;
       return {
-        content: [
-          {
-            type: "text",
-            text: `Deleted ${what} from agentmemory. Engine reported ${result.deleted ?? 0} record(s) removed.`,
-          },
-        ],
-        details: { ok: true, kind: params.kind, id: params.id, engine: result },
+        content: [{ type: "text", text }],
+        details: { ok: removedCount > 0, kind: params.kind, id: params.id, engine: result },
       };
     },
   });
