@@ -32,6 +32,19 @@ type HealthResponse = {
   };
 };
 
+// Classify a health response. `degraded` is operational (server up,
+// reads/writes work) just not pristine — treat as on, not off.
+type HealthClass = "healthy" | "degraded" | "unhealthy" | "unknown";
+
+function classifyHealth(health: HealthResponse | null): HealthClass {
+  if (!health) return "unhealthy";
+  const status = health.status || health.health?.status;
+  if (status === "healthy") return "healthy";
+  if (status === "degraded") return "degraded";
+  if (status) return "unhealthy";
+  return "unknown";
+}
+
 const DEFAULT_URL = process.env.AGENTMEMORY_URL || "http://localhost:3111";
 const guardPlaintextBearerAuth = createPlaintextBearerAuthGuard();
 
@@ -189,13 +202,16 @@ export default function agentmemoryExtension(pi: ExtensionAPI) {
     ui: { setStatus: (key: string, text: string) => void };
   }) {
     const health = await getHealth();
-    lastHealthOk =
-      !!health &&
-      (health.status === "healthy" || health.health?.status === "healthy");
-    ctx.ui.setStatus(
-      "agentmemory",
-      lastHealthOk ? "🧠 agentmemory" : "🧠 agentmemory off",
-    );
+    const cls = classifyHealth(health);
+    // Healthy OR degraded = operational; anything else = off.
+    lastHealthOk = cls === "healthy" || cls === "degraded";
+    const label =
+      cls === "healthy"
+        ? "🧠 agentmemory"
+        : cls === "degraded"
+          ? "🧠 agentmemory~"
+          : "🧠 agentmemory off";
+    ctx.ui.setStatus("agentmemory", label);
   }
 
   // Build the /agentmemory status panel. Read-only snapshot of server
@@ -203,11 +219,9 @@ export default function agentmemoryExtension(pi: ExtensionAPI) {
   // caller (async) and threaded in so this stays sync like the glm-tweaks
   // reference.
   function renderStatus(health: HealthResponse | null): string {
-    const healthy =
-      !!health &&
-      (health.status === "healthy" || health.health?.status === "healthy");
+    const statusWord = health?.status || health?.health?.status || "unknown";
     const healthLine = health
-      ? `${healthy ? "healthy" : health.status || health.health?.status || "unknown"}${health.version ? ` v${health.version}` : ""}`
+      ? `${statusWord}${health.version ? ` v${health.version}` : ""}`
       : "unreachable at http://localhost:3111";
     const flagLines = FLAGS.map(
       (f) => `  ${pi.getFlag(f.name) === true ? "[x]" : "[ ]"} ${f.name}`,
@@ -317,11 +331,8 @@ export default function agentmemoryExtension(pi: ExtensionAPI) {
         values: ["on", "off"],
       }));
 
-      const healthy =
-        !!health &&
-        (health.status === "healthy" || health.health?.status === "healthy");
       const healthText = health
-        ? `${healthy ? "healthy" : health.status || health.health?.status || "unknown"}${health.version ? ` v${health.version}` : ""}`
+        ? `${health.status || health.health?.status || "unknown"}${health.version ? ` v${health.version}` : ""}`
         : "unreachable";
 
       await ctx.ui.custom((tui, theme, _kb, done) => {

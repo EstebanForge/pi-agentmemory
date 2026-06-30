@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.0.5 (2026-06-30)
+
+### Fixed
+- Status bar no longer shows `🧠 agentmemory off` for a pressured
+  server. The display path only accepted `status === "healthy"`, so a
+  working-but-`degraded` server (reachable, reads/writes succeed) read
+  as off. A new `classifyHealth` helper routes `healthy`/`degraded`/
+  `unhealthy`/`unknown`; `degraded` now shows as `🧠 agentmemory~` (on,
+  distinct marker) and `lastHealthOk` is widened so the `agent_end`
+  observation hook still fires. `/agentmemory` panel and TUI menu
+  surface the real status word plus version.
+
 ## 1.0.4 (2026-06-30)
 
 ### Fixed
