@@ -513,6 +513,145 @@ export default function agentmemoryExtension(pi: ExtensionAPI) {
     },
   });
 
+  pi.registerTool({
+    name: "memory_delete",
+    label: "Memory Delete",
+    description:
+      "Permanently delete a memory, an entire session (+ its observations), or specific observations from agentmemory. HARD CONFIRMATION REQUIRED: shows the human exactly what will be removed and blocks until they approve. Never use for bulk pruning (consolidation handles that); reserve for privacy removal or correcting wrong info.",
+    promptSnippet:
+      "memory_delete removes a memory/session/observations from agentmemory. It ALWAYS prompts the human for explicit confirmation first; never call it speculatively.",
+    promptGuidelines: [
+      "memory_delete is destructive and always prompts the human. Only call it when the user explicitly asks to remove something (privacy, wrong info). Never use it for bulk cleanup.",
+    ],
+    parameters: Type.Object({
+      id: Type.String({
+        description:
+          "The ID to delete: a memoryId (kind=memory), a sessionId (kind=session), or an observation's sessionId (kind=observations)",
+      }),
+      kind: Type.Union(
+        [
+          Type.Literal("memory"),
+          Type.Literal("session"),
+          Type.Literal("observations"),
+        ],
+        { description: "What 'id' refers to: a memory, a whole session, or observations within a session" },
+      ),
+      observationIds: Type.Optional(
+        Type.Array(Type.String(), {
+          description:
+            "Required when kind=observations: specific observation IDs within the session to delete. Omit for kind=memory or kind=session.",
+        }),
+      ),
+      reason: Type.Optional(
+        Type.String({ description: "Short reason for the audit trail" }),
+      ),
+    }),
+    executionMode: "sequential",
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const ensured = await ensureServer(ensureOpts());
+      if (!ensured.ok) {
+        return {
+          content: [{ type: "text", text: ensured.reason }],
+          details: { ok: false },
+        };
+      }
+
+      // Build a human-readable preview of exactly what dies, so the
+      // confirmation dialog is informative. Lookups are best-effort: if the
+      // engine is unreachable or the ID is malformed, we still show the raw id
+      // and let the human decide.
+      let previewLines: string[];
+      if (params.kind === "memory") {
+        previewLines = [`1 memory: ${params.id}`];
+      } else if (params.kind === "session") {
+        const sessions = await callAgentMemory<{ sessions?: Array<{ id: string; cwd?: string; observationCount?: number }> }>(
+          `sessions?limit=500`,
+          { method: "GET" },
+        );
+        const match = sessions?.sessions?.find((s) => s.id === params.id);
+        previewLines = match
+          ? [
+              `Session ${params.id}`,
+              `  cwd: ${match.cwd ?? "(unknown)"}`,
+              `  observations: ${match.observationCount ?? "(unknown)"}`,
+              `Deletes the session record, its summary, and ALL its observations.`,
+            ]
+          : [`Session ${params.id} (details unavailable; will attempt deletion)`];
+      } else {
+        // kind=observations
+        previewLines = [
+          `${params.observationIds?.length ?? 0} observation(s) in session ${params.id}`,
+          ...(params.observationIds ?? []).map((o) => `  - ${o}`),
+        ];
+      }
+
+      // HARD GATE: blocks tool execution until the human answers in the TUI.
+      // In headless/RPC mode ui.confirm has no TUI and resolves false, so
+      // unattended agents cannot delete — by design.
+      const confirmed = await ctx.ui.confirm(
+        "Delete from agentmemory?",
+        [
+          "This is permanent and audited. Confirm only if you initiated this.",
+          "",
+          ...previewLines,
+          "",
+          `reason: ${params.reason ?? "(none given)"}`,
+        ].join("\n"),
+      );
+      if (!confirmed) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: "Deletion cancelled by the human. Memory left untouched.",
+            },
+          ],
+          details: { ok: false, cancelled: true },
+        };
+      }
+
+      // Map to the REST mem::forget function — the only path that correctly
+      // handles memories, sessions, AND observations on engine 0.9.27.
+      // (The memory_governance_delete MCP tool silently no-ops on observations.)
+      const body: Record<string, unknown> = { reason: params.reason ?? "pi memory_delete" };
+      if (params.kind === "memory") body.memoryId = params.id;
+      else {
+        body.sessionId = params.id;
+        if (params.kind === "observations" && params.observationIds?.length) {
+          body.observationIds = params.observationIds;
+        }
+      }
+      const result = await callAgentMemory<{ deleted?: number; success?: boolean }>(
+        "forget",
+        { body },
+      );
+      if (!result) {
+        return {
+          content: [
+            { type: "text", text: "Forget call failed (engine unreachable or refused)." },
+          ],
+          details: { ok: false },
+        };
+      }
+      // Engine reports success even on phantom deletes (upstream #833), so we
+      // surface its count but frame the outcome by what we asked for, not by
+      // the engine's possibly-inflated number.
+      const what =
+        params.kind === "memory" ? "memory"
+        : params.kind === "session" ? "session (record, summary, observations)"
+        : `${params.observationIds?.length ?? 0} observation(s)`;
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Deleted ${what} from agentmemory. Engine reported ${result.deleted ?? 0} record(s) removed.`,
+          },
+        ],
+        details: { ok: true, kind: params.kind, id: params.id, engine: result },
+      };
+    },
+  });
+
   // Hook: session_start
   pi.on("session_start", async (_event, ctx) => {
     const sessionFile = ctx.sessionManager.getSessionFile();
